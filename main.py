@@ -16,14 +16,18 @@ load_dotenv()
 
 app = FastAPI()
 
-# CORS middleware
+# Update CORS middleware with specific origin
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update with your frontend URL in production
+    allow_origins=["https://main.djtbx90lomjk6.amplifyapp.com"],  # Specific origin
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],  # Specify methods
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
+
+# ... rest of your FastAPI code remains the same ...
 
 # Initialize Groq client with error handling
 try:
