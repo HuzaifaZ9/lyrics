@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import os
-from dotenv import load_dotenv
 import logging
 import traceback
 
@@ -14,8 +13,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Load environment variables if dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    logger.info("Loaded environment from .env file")
+except ImportError:
+    logger.info("dotenv not installed, skipping .env loading")
 
 app = FastAPI()
 
@@ -32,45 +36,58 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers for simplicity
 )
 
-# Get Groq API key from environment with better error handling
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-#GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-# Debug environment variables
-logger.info(f"GROQ_API_KEY present: {GROQ_API_KEY is not None}")
-logger.info(f"Environment variables: {list(os.environ.keys())}")
+# Log available environment variables for debugging
+logger.info(f"Available environment variables: {list(os.environ.keys())}")
 
-# Initialize Groq client with detailed error handling
+# Get Groq API key with better logging
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+logger.info(f"Initial GROQ_API_KEY present: {GROQ_API_KEY is not None}")
+
+# If the key contains template syntax, extract the actual value
+# This handles variables in the format ${shared.VARIABLE_NAME}
+if GROQ_API_KEY and "${" in GROQ_API_KEY:
+    try:
+        # Extract the actual variable name from ${shared.VARIABLE_NAME}
+        var_path = GROQ_API_KEY.split("${")[1].split("}")[0]
+        logger.info(f"Extracted variable path: {var_path}")
+        
+        # Handle "shared." prefix if present
+        if "." in var_path:
+            var_name = var_path.split(".")[1]
+        else:
+            var_name = var_path
+            
+        # Try to get the actual value from environment
+        actual_key = os.environ.get(var_name)
+        if actual_key:
+            GROQ_API_KEY = actual_key
+            logger.info(f"Successfully resolved variable to actual API key")
+        else:
+            logger.error(f"Could not find environment variable: {var_name}")
+    except Exception as e:
+        logger.error(f"Error parsing environment variable template: {str(e)}")
+
+# Initialize Groq client
 client = None
 try:
     # Import Groq here to avoid import errors if the library isn't installed
     from groq import Groq
     
-    # Try multiple environment variable names that might be used in deployment
-    if not GROQ_API_KEY:
-        potential_keys = ["GROQ_API_KEY", "GROQ_KEY", "GROQ_TOKEN", "GROQAPIKEY"]
-        for key in potential_keys:
-            potential_value = os.environ.get(key)
-            if potential_value:
-                GROQ_API_KEY = potential_value
-                logger.info(f"Found API key in environment variable: {key}")
-                break
-    
     if GROQ_API_KEY:
         client = Groq(api_key=GROQ_API_KEY)
-        # Test the client with a simple call to ensure it's working
-        test_messages = [{"role": "user", "content": "Hello"}]
+        # Test the client with a minimal request to verify it works
         try:
             test_response = client.chat.completions.create(
-                messages=test_messages,
+                messages=[{"role": "user", "content": "test"}],
                 model="mixtral-8x7b-32768",
-                max_tokens=10
+                max_tokens=5
             )
-            logger.info("Groq client successfully tested")
+            logger.info("Groq client initialized and tested successfully")
         except Exception as test_error:
-            logger.error(f"Groq client test failed: {str(test_error)}")
+            logger.error(f"Groq API key validation failed: {str(test_error)}")
             client = None
     else:
-        logger.error("GROQ_API_KEY environment variable is not set")
+        logger.error("GROQ_API_KEY environment variable is not set or is empty")
 except ImportError:
     logger.error("Failed to import Groq. Please install with 'pip install groq'")
 except Exception as e:
@@ -93,13 +110,19 @@ async def generate_lyrics(request: LyricsRequest):
             logger.warning("Empty prompt received")
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
-        # Enhanced client check with more detailed error message
+        # Enhanced check for client initialization
         if client is None:
             logger.error("Groq client not initialized when handling request")
+            # Return a more detailed error message
             return {
                 "lyrics": f"This is a test response for prompt: {request.prompt}\nStyle: {request.style}\nLength: {request.length}",
                 "status": "test_mode",
-                "error": "Groq client not initialized. Please check your GROQ_API_KEY environment variable."
+                "error": "Groq client not initialized. Check API key configuration.",
+                "debug_info": {
+                    "api_key_present": GROQ_API_KEY is not None,
+                    "api_key_length": len(GROQ_API_KEY) if GROQ_API_KEY else 0,
+                    "available_env_vars": list(os.environ.keys())
+                }
             }
 
         # Prepare the messages for Groq
@@ -174,17 +197,8 @@ async def health_check():
         "status": "healthy",
         "groq_client": "initialized" if client is not None else "not initialized",
         "groq_api_key_present": GROQ_API_KEY is not None,
+        "groq_api_key_length": len(GROQ_API_KEY) if GROQ_API_KEY else 0,
         "environment_variables": list(os.environ.keys())
-    }
-
-# Add a debug endpoint to check environment variables
-@app.get("/debug")
-async def debug_endpoint():
-    logger.info("Debug endpoint accessed")
-    # Only show that variables exist, not their values for security
-    return {
-        "environment_variables": list(os.environ.keys()),
-        "groq_api_key_present": GROQ_API_KEY is not None
     }
 
 if __name__ == "__main__":
