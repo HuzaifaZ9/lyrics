@@ -6,9 +6,13 @@ from groq import Groq
 import os
 from dotenv import load_dotenv
 import logging
+import traceback
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging with more detailed format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -16,24 +20,34 @@ load_dotenv()
 
 app = FastAPI()
 
-# CORS middleware - Updated configuration
+# Print environment info for debugging
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+logger.info(f"GROQ_API_KEY present: {GROQ_API_KEY is not None}")
+
+# CORS middleware with expanded configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://main.djtbx90lomjk6.amplifyapp.com"],  # Specify your frontend URL
-    allow_credentials=True,  # Changed to True
-    allow_methods=["GET", "POST", "OPTIONS"],  # Explicitly list allowed methods
-    allow_headers=["Content-Type", "Accept", "Authorization"],  # Explicitly list allowed headers
-    expose_headers=["Content-Type"],
+    allow_origins=[
+        "https://main.djtbx90lomjk6.amplifyapp.com",
+        "http://localhost:3000",  # For local development
+        "*"  # As fallback during testing
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods for simplicity
+    allow_headers=["*"],  # Allow all headers for simplicity
 )
 
-# Initialize Groq client with error handling
+# Initialize Groq client with detailed error handling
 try:
-    client = Groq(
-        api_key=os.getenv("GROQ_API_KEY")
-    )
-    logger.info("Groq client initialized successfully")
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY environment variable is not set")
+        client = None
+    else:
+        client = Groq(api_key=GROQ_API_KEY)
+        logger.info("Groq client initialized successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize Groq client: {str(e)}")
+    error_trace = traceback.format_exc()
+    logger.error(f"Failed to initialize Groq client: {str(e)}\n{error_trace}")
     client = None
 
 class LyricsRequest(BaseModel):
@@ -44,18 +58,29 @@ class LyricsRequest(BaseModel):
 @app.post("/generate-lyrics")
 async def generate_lyrics(request: LyricsRequest):
     try:
-        # Check if client is initialized
-        if client is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Groq client not initialized. Please check server configuration."
-            )
-
-        logger.info(f"Received request with prompt: {request.prompt}")
+        # Log the request
+        logger.info(f"Received lyrics generation request with prompt: '{request.prompt}'")
         
+        # Check if prompt is provided
         if not request.prompt:
+            logger.warning("Empty prompt received")
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
+        # Check if client is initialized
+        if client is None:
+            logger.error("Groq client not initialized when handling request")
+            # Return a fallback response during testing
+            return {
+                "lyrics": f"This is a test response for prompt: {request.prompt}\nStyle: {request.style}\nLength: {request.length}",
+                "status": "test_mode"
+            }
+            # Uncomment below to return an error instead of test response
+            # raise HTTPException(
+            #     status_code=500,
+            #     detail="Groq client not initialized. Please check server configuration."
+            # )
+
+        # Prepare the messages for Groq
         messages = [
             {
                 "role": "system",
@@ -69,41 +94,74 @@ async def generate_lyrics(request: LyricsRequest):
 
         logger.info("Calling Groq API...")
         
-        completion = client.chat.completions.create(
-            messages=messages,
-            model="mixtral-8x7b-32768",
-            temperature=0.7,
-            max_tokens=1024,
-            top_p=0.9,
-            stream=False
-        )
+        # Make the API call with try-except
+        try:
+            completion = client.chat.completions.create(
+                messages=messages,
+                model="mixtral-8x7b-32768",
+                temperature=0.7,
+                max_tokens=1024,
+                top_p=0.9,
+                stream=False
+            )
+            
+            lyrics = completion.choices[0].message.content
+            logger.info("Successfully generated lyrics")
+            
+            # Return the formatted response
+            return {
+                "lyrics": lyrics.strip(),
+                "status": "success"
+            }
+            
+        except Exception as groq_error:
+            logger.error(f"Error calling Groq API: {str(groq_error)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error generating lyrics: {str(groq_error)}"
+            )
 
-        lyrics = completion.choices[0].message.content
-        logger.info("Successfully generated lyrics")
-
-        return {
-            "lyrics": lyrics.strip(),
-            "status": "success"
-        }
-
+    except HTTPException as http_ex:
+        # Re-raise HTTP exceptions as they are already formatted correctly
+        raise
     except Exception as e:
-        logger.error(f"Error in generate_lyrics: {str(e)}")
+        # Catch all other exceptions with detailed logging
+        error_trace = traceback.format_exc()
+        logger.error(f"Unexpected error in generate_lyrics: {str(e)}\n{error_trace}")
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=f"Internal server error: {str(e)}"
         )
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the Lyrics Generator API"}
+    logger.info("Root endpoint accessed")
+    return {
+        "message": "Welcome to the Lyrics Generator API",
+        "endpoints": {
+            "/": "This information",
+            "/health": "API health status",
+            "/generate-lyrics": "POST endpoint for lyrics generation"
+        }
+    }
 
 @app.get("/health")
 async def health_check():
+    logger.info("Health check endpoint accessed")
     return {
         "status": "healthy",
-        "groq_client": "initialized" if client is not None else "not initialized"
+        "groq_client": "initialized" if client is not None else "not initialized",
+        "groq_api_key_present": GROQ_API_KEY is not None
     }
+
+# Add a test endpoint
+@app.get("/test")
+async def test_endpoint():
+    logger.info("Test endpoint accessed")
+    return {"message": "Test endpoint working correctly"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
