@@ -36,66 +36,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Get Groq API key with better logging
+# Get Groq API key
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 logger.info(f"GROQ_API_KEY present: {GROQ_API_KEY is not None}")
-logger.info(f"GROQ_API_KEY length: {len(GROQ_API_KEY) if GROQ_API_KEY else 0}")
 
-# Only show first/last few characters of API key for debugging (without exposing the full key)
-if GROQ_API_KEY and len(GROQ_API_KEY) > 10:
-    masked_key = f"{GROQ_API_KEY[:4]}...{GROQ_API_KEY[-4:]}"
-    logger.info(f"GROQ_API_KEY format check: {masked_key}")
-
-# Initialize Groq client with very detailed error handling
+# Initialize Groq client with version compatibility
 client = None
 groq_error_message = None
 try:
     # Try to import the Groq library
-    logger.info("Attempting to import Groq library...")
-    try:
-        from groq import Groq
-        logger.info("Successfully imported Groq library")
-    except ImportError as imp_err:
-        logger.error(f"Failed to import Groq library: {str(imp_err)}")
-        groq_error_message = f"ImportError: {str(imp_err)}"
-        raise
+    from groq import Groq
+    logger.info("Successfully imported Groq library")
     
-    # Check if API key is available
-    if not GROQ_API_KEY:
-        logger.error("GROQ_API_KEY is not set")
-        groq_error_message = "API key not found in environment variables"
-        raise ValueError("API key not found in environment variables")
-    
-    # Try to initialize the client
-    logger.info("Initializing Groq client...")
-    try:
-        client = Groq(api_key=GROQ_API_KEY)
-        logger.info("Groq client initialized successfully")
-    except Exception as init_err:
-        logger.error(f"Failed to initialize Groq client: {str(init_err)}")
-        groq_error_message = f"Client initialization error: {str(init_err)}"
-        raise
-    
-    # Test the client with a minimal request
-    logger.info("Testing Groq client with a minimal request...")
-    try:
-        test_response = client.chat.completions.create(
-            messages=[{"role": "user", "content": "Hello"}],
-            model="mixtral-8x7b-32768",
-            max_tokens=5
-        )
-        logger.info("Groq client test successful")
-    except Exception as test_err:
-        logger.error(f"Groq client test failed: {str(test_err)}")
-        groq_error_message = f"API test error: {str(test_err)}"
-        client = None
-        raise
-        
+    if GROQ_API_KEY:
+        try:
+            # Initialize client with just the API key - no extra parameters
+            # This should work with all versions of the Groq library
+            client = Groq(api_key=GROQ_API_KEY)
+            logger.info("Groq client initialized successfully")
+            
+            # Test the client
+            test_response = client.chat.completions.create(
+                messages=[{"role": "user", "content": "Hello"}],
+                model="mixtral-8x7b-32768",
+                max_tokens=5
+            )
+            logger.info("Groq client test successful")
+        except Exception as e:
+            logger.error(f"Error initializing or testing Groq client: {str(e)}")
+            groq_error_message = str(e)
+            client = None
+    else:
+        groq_error_message = "API key not found"
+        logger.error("GROQ_API_KEY environment variable is not set")
+except ImportError as e:
+    groq_error_message = f"Failed to import Groq library: {str(e)}"
+    logger.error(groq_error_message)
 except Exception as e:
+    groq_error_message = f"Unexpected error: {str(e)}"
     error_trace = traceback.format_exc()
     logger.error(f"Groq client setup failed: {str(e)}\n{error_trace}")
-    if not groq_error_message:
-        groq_error_message = f"Unexpected error: {str(e)}"
 
 class LyricsRequest(BaseModel):
     prompt: str
@@ -113,19 +93,13 @@ async def generate_lyrics(request: LyricsRequest):
             logger.warning("Empty prompt received")
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
-        # Enhanced check for client initialization
+        # Check if client is initialized
         if client is None:
             logger.error("Groq client not initialized when handling request")
-            # Return a more detailed error message
             return {
                 "lyrics": f"This is a test response for prompt: {request.prompt}\nStyle: {request.style}\nLength: {request.length}",
                 "status": "test_mode",
-                "error": f"Groq client not initialized: {groq_error_message}",
-                "debug_info": {
-                    "api_key_present": GROQ_API_KEY is not None,
-                    "api_key_length": len(GROQ_API_KEY) if GROQ_API_KEY else 0,
-                    "api_key_format": f"{GROQ_API_KEY[:4]}...{GROQ_API_KEY[-4:]}" if GROQ_API_KEY and len(GROQ_API_KEY) > 8 else "N/A"
-                }
+                "error": f"Groq client not initialized: {groq_error_message}"
             }
 
         # Prepare the messages for Groq
@@ -199,48 +173,7 @@ async def health_check():
     return {
         "status": "healthy",
         "groq_client": "initialized" if client is not None else "not initialized",
-        "groq_error": groq_error_message,
-        "api_key_present": GROQ_API_KEY is not None,
-        "api_key_length": len(GROQ_API_KEY) if GROQ_API_KEY else 0,
-        "api_key_format": f"{GROQ_API_KEY[:4]}...{GROQ_API_KEY[-4:]}" if GROQ_API_KEY and len(GROQ_API_KEY) > 8 else "N/A"
-    }
-
-# Add direct API key testing endpoint
-@app.get("/test-api-key")
-async def test_api_key():
-    logger.info("Test API key endpoint accessed")
-    
-    # Get the API key from environment again (in case it changed)
-    current_key = os.environ.get("GROQ_API_KEY")
-    
-    # Create a temporary client for testing
-    temp_client = None
-    test_result = "failed"
-    error_message = "No API key found"
-    
-    try:
-        if current_key:
-            from groq import Groq
-            temp_client = Groq(api_key=current_key)
-            
-            # Test with minimal request
-            test_response = temp_client.chat.completions.create(
-                messages=[{"role": "user", "content": "Test"}],
-                model="mixtral-8x7b-32768",
-                max_tokens=5
-            )
-            
-            test_result = "success"
-            error_message = None
-    except Exception as e:
-        error_message = str(e)
-    
-    return {
-        "test_result": test_result,
-        "error_message": error_message,
-        "api_key_present": current_key is not None,
-        "api_key_length": len(current_key) if current_key else 0,
-        "api_key_format": f"{current_key[:4]}...{current_key[-4:]}" if current_key and len(current_key) > 8 else "N/A"
+        "groq_error": groq_error_message
     }
 
 if __name__ == "__main__":
