@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-from groq import Groq
 import os
 from dotenv import load_dotenv
 import logging
@@ -20,10 +19,6 @@ load_dotenv()
 
 app = FastAPI()
 
-# Print environment info for debugging
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-logger.info(f"GROQ_API_KEY present: {GROQ_API_KEY is not None}")
-
 # CORS middleware with expanded configuration
 app.add_middleware(
     CORSMiddleware,
@@ -37,18 +32,50 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers for simplicity
 )
 
+# Get Groq API key from environment with better error handling
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Debug environment variables
+logger.info(f"GROQ_API_KEY present: {GROQ_API_KEY is not None}")
+logger.info(f"Environment variables: {list(os.environ.keys())}")
+
 # Initialize Groq client with detailed error handling
+client = None
 try:
+    # Import Groq here to avoid import errors if the library isn't installed
+    from groq import Groq
+    
+    # Try multiple environment variable names that might be used in deployment
     if not GROQ_API_KEY:
-        logger.error("GROQ_API_KEY environment variable is not set")
-        client = None
-    else:
+        potential_keys = ["GROQ_API_KEY", "GROQ_KEY", "GROQ_TOKEN", "GROQAPIKEY"]
+        for key in potential_keys:
+            potential_value = os.environ.get(key)
+            if potential_value:
+                GROQ_API_KEY = potential_value
+                logger.info(f"Found API key in environment variable: {key}")
+                break
+    
+    if GROQ_API_KEY:
         client = Groq(api_key=GROQ_API_KEY)
-        logger.info("Groq client initialized successfully")
+        # Test the client with a simple call to ensure it's working
+        test_messages = [{"role": "user", "content": "Hello"}]
+        try:
+            test_response = client.chat.completions.create(
+                messages=test_messages,
+                model="mixtral-8x7b-32768",
+                max_tokens=10
+            )
+            logger.info("Groq client successfully tested")
+        except Exception as test_error:
+            logger.error(f"Groq client test failed: {str(test_error)}")
+            client = None
+    else:
+        logger.error("GROQ_API_KEY environment variable is not set")
+except ImportError:
+    logger.error("Failed to import Groq. Please install with 'pip install groq'")
 except Exception as e:
     error_trace = traceback.format_exc()
     logger.error(f"Failed to initialize Groq client: {str(e)}\n{error_trace}")
-    client = None
 
 class LyricsRequest(BaseModel):
     prompt: str
@@ -66,19 +93,14 @@ async def generate_lyrics(request: LyricsRequest):
             logger.warning("Empty prompt received")
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
-        # Check if client is initialized
+        # Enhanced client check with more detailed error message
         if client is None:
             logger.error("Groq client not initialized when handling request")
-            # Return a fallback response during testing
             return {
                 "lyrics": f"This is a test response for prompt: {request.prompt}\nStyle: {request.style}\nLength: {request.length}",
-                "status": "test_mode"
+                "status": "test_mode",
+                "error": "Groq client not initialized. Please check your GROQ_API_KEY environment variable."
             }
-            # Uncomment below to return an error instead of test response
-            # raise HTTPException(
-            #     status_code=500,
-            #     detail="Groq client not initialized. Please check server configuration."
-            # )
 
         # Prepare the messages for Groq
         messages = [
@@ -151,14 +173,19 @@ async def health_check():
     return {
         "status": "healthy",
         "groq_client": "initialized" if client is not None else "not initialized",
-        "groq_api_key_present": GROQ_API_KEY is not None
+        "groq_api_key_present": GROQ_API_KEY is not None,
+        "environment_variables": list(os.environ.keys())
     }
 
-# Add a test endpoint
-@app.get("/test")
-async def test_endpoint():
-    logger.info("Test endpoint accessed")
-    return {"message": "Test endpoint working correctly"}
+# Add a debug endpoint to check environment variables
+@app.get("/debug")
+async def debug_endpoint():
+    logger.info("Debug endpoint accessed")
+    # Only show that variables exist, not their values for security
+    return {
+        "environment_variables": list(os.environ.keys()),
+        "groq_api_key_present": GROQ_API_KEY is not None
+    }
 
 if __name__ == "__main__":
     import uvicorn
