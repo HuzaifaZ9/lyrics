@@ -15,7 +15,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 
 app = FastAPI()
 
@@ -33,8 +33,8 @@ app.add_middleware(
 )
 
 # Get Groq API key from environment with better error handling
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
+#GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # Debug environment variables
 logger.info(f"GROQ_API_KEY present: {GROQ_API_KEY is not None}")
 logger.info(f"Environment variables: {list(os.environ.keys())}")
